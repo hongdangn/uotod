@@ -7,4 +7,4 @@ from .BalancedSinkhorn import BalancedSinkhorn
 from .UnbalancedSinkhorn import UnbalancedSinkhorn
 from .BalancedPOT import BalancedPOT
 from .UnbalancedPOT import UnbalancedPOT
-from .WeightedSum import WeightedSum
+# from .WeightedSum import WeightedSum

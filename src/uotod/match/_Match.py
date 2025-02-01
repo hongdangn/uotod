@@ -9,7 +9,7 @@ import torch.nn as nn
 from torch.nn.modules.loss import _Loss
 
 from ..utils import convert_target_to_dict, kwargs_decorator
-from ..plot import image_with_boxes, match, cost
+# from ..plot import image_with_boxes, match, cost
 
 
 class _Match(nn.Module, metaclass=ABCMeta):
@@ -53,25 +53,22 @@ class _Match(nn.Module, metaclass=ABCMeta):
         self._individual = kwargs['individual']
 
     @torch.no_grad()
-    def forward(self,
-                input: Union[Dict[str, Tensor], List[Dict[str, Tensor]]],
-                target: Union[Dict[str, Tensor], List[Dict[str, Tensor]]],
-                anchors: Optional[Tensor] = None,
-                cost_matrix: Optional[Tensor] = None,
+    def forward(self, 
+                input, 
+                target, 
+                anchors: Optional[Tensor] = None, 
+                cost_matrix: Optional[Tensor] = None, 
                 save: bool= True) \
             -> Union[Tensor, Tuple[Tensor, Tensor]]:
         r"""
-        Computes a batch of matchings between the predicted and target boxes.
+        Computes a batch of cost matrices between the descriptions of all labels and the target queries.
 
-        :param input: Input containing the predicted logits and boxes.
-            "pred_logits": Tensor of shape (batch_size, num_pred, num_classes).
-            "pred_boxes": Tensor of shape (batch_size, num_pred, 4), where the last dimension is (x1, y1, x2, y2).
-        :type input: dictionary
-        :param target: Target containing the target classes, boxes and mask.
-            "labels": Tensor of shape (batch_size, num_targets).
-            "boxes": Tensor of shape (batch_size, num_targets, 4), where the last dimension is (x1, y1, x2, y2).
-            "mask": Tensor of shape (batch_size, num_targets).
-        :type target: dictionary
+        :param input: Target containing the queries.
+                       Tensor of shape (batch_size, num_queries, hidden_dim).
+        :type input: Tensor
+
+        :param target: Input containing the text description of all labels
+        :type target: Tensor
         :param anchors: the anchors used to compute the predicted boxes.
             (batch_size, num_pred, 4), where the last dimension is (x1, y1, x2, y2).
         :type anchors: Tensor
@@ -80,8 +77,6 @@ class _Match(nn.Module, metaclass=ABCMeta):
             background.
         :rtype: Tensor (float) or Tuple(Tensor, Tensor)
         """
-        if target["mask"] is not None:
-            assert target["mask"].dtype == torch.bool, "The target mask must be of type bool."
 
         # emptying the cache
         self._last_cost = None
@@ -94,7 +89,9 @@ class _Match(nn.Module, metaclass=ABCMeta):
             cost_matrix = self.compute_cost_matrix(input, target, anchors)
 
         # Compute the matching.
-        matching = self.compute_matching(cost_matrix, target["mask"])
+        batch_size, _, num_tgt = cost_matrix.shape
+        target_mask = torch.ones((batch_size, num_tgt))
+        matching = self.compute_matching(cost_matrix, target_mask)
 
         # Verify that the matching is not NaN.
         if torch.isnan(matching).any():
@@ -110,21 +107,19 @@ class _Match(nn.Module, metaclass=ABCMeta):
         return matching
 
     def compute_cost_matrix(self,
-                            input: Union[Dict[str, Tensor], List[Dict[str, Tensor]]],
-                            target: Union[Dict[str, Tensor], List[Dict[str, Tensor]]],
+                            input,
+                            target,
                             anchors: Optional[Tensor] = None) -> Tensor:
         r"""
-        Computes a batch of cost matrices between the predicted and target boxes.
+        Computes a batch of cost matrices between the descriptions of all labels and the target queries.
 
-        :param input: Input containing the predicted logits and boxes.
-            "pred_logits": Tensor of shape (batch_size, num_pred, num_classes).
-            "pred_boxes": Tensor of shape (batch_size, num_pred, 4), where the last dimension is (x1, y1, x2, y2).
-        :type input: dictionary
-        :param target: Target containing the target classes, boxes and mask.
-            "labels": Tensor of shape (batch_size, num_targets).
-            "boxes": Tensor of shape (batch_size, num_targets, 4), where the last dimension is (x1, y1, x2, y2).
-            "mask": Tensor of shape (batch_size, num_targets).
-        :type target: dictionary
+        :param input: Target containing the queries.
+                       Tensor of shape (batch_size, num_queries, hidden_dim).
+        :type input: Tensor
+
+        :param target: Input containing the text description of all labels
+        :type target: Tensor
+
         :param anchors: the anchors used to compute the predicted boxes.
             (batch_size, num_pred, 4), where the last dimension is (x1, y1, x2, y2).
         :type anchors: Tensor
@@ -141,26 +136,16 @@ class _Match(nn.Module, metaclass=ABCMeta):
             warn("The anchors are provided but the matching method is not anchor-based.")
 
         # Convert the target to dict of masked tensors if necessary.
-        if not isinstance(target, dict):
-            target = convert_target_to_dict(target)
+        # if not isinstance(target, dict):
+        #     target = convert_target_to_dict(target)
 
         # Compute the cost matrix.
-        cls_cost = self._compute_cls_costs(input["pred_logits"], target["labels"])
-        if self.is_anchor_based:
-            loc_cost = self._compute_loc_costs(anchors, target["boxes"])
-        else:
-            loc_cost = self._compute_loc_costs(input["pred_boxes"], target["boxes"])
-        if cls_cost is not None and loc_cost is not None:
-            cost_matrix = loc_cost + cls_cost
-        elif cls_cost is None:
-            cost_matrix = loc_cost
-        elif loc_cost is None:
-            cost_matrix = cls_cost
+        cost = self._compute_costs(input, target)
+
+        if cost is not None:
+            cost_matrix = cost
         else:
             raise ValueError("Both localization and classification costs are undefined.")
-
-        # Mask the cost matrix.
-        cost_matrix = cost_matrix * target["mask"].unsqueeze(dim=1).expand(cost_matrix.shape)
 
         # Add the background cost.
         if self.background:
@@ -168,69 +153,25 @@ class _Match(nn.Module, metaclass=ABCMeta):
                                     dim=2)
 
         return cost_matrix
+    
+    def _compute_costs(self, input: Tensor, target: Tensor) -> Optional[Tensor]:
+        # input: queries with size (batch_size, num_queries, dim)
+        # target: labels descriptions with size (num_labels, dim)
+        costs = []
+        batch_size, num_queries = input.size()[:2]
+        input = input.view(batch_size * num_queries, -1)
+        criterion = torch.nn.MSELoss(reduction="mean")
 
-    def _compute_cls_costs(self, pred_logits: Tensor, tgt_classes: Tensor) -> Optional[Tensor]:
-        r"""
-        Computes the classification cost matrix.
-        :param pred_logits: Predicted logits. Tensor of shape (batch_size, num_pred, num_classes).
-        :param tgt_classes: Target classes. Tensor of shape (batch_size, num_targets).
-        :return: the classification cost matrix. Tensor of shape (batch_size, num_pred, num_classes).
-        """
-        if self.matching_loc_module is None and self.matching_cls_module is None:
-            raise ValueError("At least a classification or a localization loss module must be provided.")
+        for query in input:
+          tmp_loss = torch.cat([criterion(query, label_desc).unsqueeze(0)
+                                for label_desc in target])
+          costs.append(tmp_loss.unsqueeze(0))
 
-        if self.matching_cls_module is None:
-            return None
+        costs = torch.cat(costs, dim = 0).view(batch_size, num_queries, -1)
 
-        batch_size, num_pred, num_classes = pred_logits.shape
+        return costs
 
-        num_tgt = tgt_classes.shape[1]
-        is_onehot = (len(tgt_classes.shape) == 3)
-
-        pred_logits_rep = pred_logits.unsqueeze(dim=2).repeat(1, 1, num_tgt, 1).view(
-            batch_size * num_pred * num_tgt, -1)
-
-        if is_onehot:
-            tgt_classes_rep = tgt_classes.unsqueeze(dim=1).repeat(1, num_pred, 1, 1)
-            tgt_classes_rep = tgt_classes_rep.view(batch_size * num_pred * num_tgt, num_classes)
-        else:
-            tgt_classes_rep = tgt_classes.unsqueeze(dim=1).repeat(1, num_pred, 1)
-            tgt_classes_rep = tgt_classes_rep.view(batch_size * num_pred * num_tgt)
-
-        # Compute the classification cost matrix.
-        cls_cost = self.matching_cls_module(pred_logits_rep, tgt_classes_rep).view(batch_size, num_pred, num_tgt)
-
-        return cls_cost
-
-    def _compute_loc_costs(self, pred_locs: Tensor, tgt_locs: Tensor) -> Optional[Tensor]:
-        r"""
-        Computes the localization cost matrix.
-
-        :param pred_locs: Predicted locations. Tensor of shape (batch_size, num_pred, 4),
-        :param tgt_locs: Target locations. Tensor of shape (batch_size, num_targets, 4),
-        :return: the localization cost matrix. Tensor of shape (batch_size, num_pred, num_targets).
-        """
-        if self.matching_loc_module is None:
-            return None
-
-        # TODO: avoid redundancy of same costs are used.
-        batch_size, num_pred = pred_locs.shape[:2]
-        num_tgt = tgt_locs.shape[1]
-
-        pred_locs_rep = pred_locs.unsqueeze(dim=2).repeat(1, 1, num_tgt, 1).view(
-            batch_size * num_pred * num_tgt, 4)
-        tgt_locs_rep = tgt_locs.unsqueeze(dim=1).repeat(1, num_pred, 1, 1).view(
-            batch_size * num_pred * num_tgt, 4)
-
-        # Compute the localization cost matrix.
-        loc_cost = self.matching_loc_module(pred_locs_rep, tgt_locs_rep)
-        if loc_cost.dim() == 2:
-            loc_cost = loc_cost.sum(dim=1)
-        loc_cost = loc_cost.view(batch_size, num_pred, num_tgt)
-
-        return loc_cost
-
-    def compute_matching(self, cost_matrix: Tensor, target_mask: Optional[Tensor]) -> Tensor:
+    def compute_matching(self, cost_matrix: Tensor, target_mask: Optional[Tensor] = None) -> Tensor:
         r"""
         Computes the matching.
 
@@ -274,6 +215,67 @@ class _Match(nn.Module, metaclass=ABCMeta):
     def _compute_matching_apart(self, cost_matrix: Tensor, out_view: Tensor, target_mask: Optional[Tensor] = None,
                                 **kwargs) -> Tensor:
         pass
+
+    # def _compute_cls_costs(self, pred_logits: Tensor, tgt_classes: Tensor) -> Optional[Tensor]:
+    #     r"""
+    #     Computes the classification cost matrix.
+    #     :param pred_logits: Predicted logits. Tensor of shape (batch_size, num_pred, num_classes).
+    #     :param tgt_classes: Target classes. Tensor of shape (batch_size, num_targets).
+    #     :return: the classification cost matrix. Tensor of shape (batch_size, num_pred, num_classes).
+    #     """
+    #     if self.matching_loc_module is None and self.matching_cls_module is None:
+    #         raise ValueError("At least a classification or a localization loss module must be provided.")
+
+    #     if self.matching_cls_module is None:
+    #         return None
+
+    #     batch_size, num_pred, num_classes = pred_logits.shape
+
+    #     num_tgt = tgt_classes.shape[1]
+    #     is_onehot = (len(tgt_classes.shape) == 3)
+
+    #     pred_logits_rep = pred_logits.unsqueeze(dim=2).repeat(1, 1, num_tgt, 1).view(
+    #         batch_size * num_pred * num_tgt, -1)
+
+    #     if is_onehot:
+    #         tgt_classes_rep = tgt_classes.unsqueeze(dim=1).repeat(1, num_pred, 1, 1)
+    #         tgt_classes_rep = tgt_classes_rep.view(batch_size * num_pred * num_tgt, num_classes)
+    #     else:
+    #         tgt_classes_rep = tgt_classes.unsqueeze(dim=1).repeat(1, num_pred, 1)
+    #         tgt_classes_rep = tgt_classes_rep.view(batch_size * num_pred * num_tgt)
+
+    #     # Compute the classification cost matrix.
+    #     cls_cost = self.matching_cls_module(pred_logits_rep, tgt_classes_rep).view(batch_size, num_pred, num_tgt)
+
+    #     return cls_cost
+
+    # def _compute_loc_costs(self, pred_locs: Tensor, tgt_locs: Tensor) -> Optional[Tensor]:
+    #     r"""
+    #     Computes the localization cost matrix.
+
+    #     :param pred_locs: Predicted locations. Tensor of shape (batch_size, num_pred, 4),
+    #     :param tgt_locs: Target locations. Tensor of shape (batch_size, num_targets, 4),
+    #     :return: the localization cost matrix. Tensor of shape (batch_size, num_pred, num_targets).
+    #     """
+    #     if self.matching_loc_module is None:
+    #         return None
+
+    #     # TODO: avoid redundancy of same costs are used.
+    #     batch_size, num_pred = pred_locs.shape[:2]
+    #     num_tgt = tgt_locs.shape[1]
+
+    #     pred_locs_rep = pred_locs.unsqueeze(dim=2).repeat(1, 1, num_tgt, 1).view(
+    #         batch_size * num_pred * num_tgt, 4)
+    #     tgt_locs_rep = tgt_locs.unsqueeze(dim=1).repeat(1, num_pred, 1, 1).view(
+    #         batch_size * num_pred * num_tgt, 4)
+
+    #     # Compute the localization cost matrix.
+    #     loc_cost = self.matching_loc_module(pred_locs_rep, tgt_locs_rep)
+    #     if loc_cost.dim() == 2:
+    #         loc_cost = loc_cost.sum(dim=1)
+    #     loc_cost = loc_cost.view(batch_size, num_pred, num_tgt)
+
+    #     return loc_cost
 
     def plot(self, idx=0, img: Optional[Union[Tensor, ndarray]] = None,
              plot_cost: bool = True,

@@ -50,8 +50,8 @@ class DetectionLoss(_Loss):
     """
 
     def __init__(self,
-                 cls_loss_module: Union[MultipleObjectiveLoss, _Loss],
-                 loc_loss_module: Union[MultipleObjectiveLoss, _Loss],
+                #  cls_loss_module: Union[MultipleObjectiveLoss, _Loss],
+                #  loc_loss_module: Union[MultipleObjectiveLoss, _Loss],
                  matching_method: _Match,
                  bg_class_position: str = "first",
                  use_hard_negative_mining: bool = False,
@@ -66,8 +66,8 @@ class DetectionLoss(_Loss):
             "bg_class_position must be 'first', 'last' or 'none'"
 
         self.matching_method = matching_method
-        self.loss_cls_module = cls_loss_module
-        self.loss_loc_module = loc_loss_module
+        # self.loss_cls_module = cls_loss_module
+        # self.loss_loc_module = loc_loss_module
         self.bg_class_position = bg_class_position
 
         self.use_hard_negative_mining = use_hard_negative_mining
@@ -78,8 +78,8 @@ class DetectionLoss(_Loss):
         self.neg_to_pos_ratio = neg_to_pos_ratio
 
     def forward(self,
-                input: Union[Dict[str, Tensor], List[Dict[str, Tensor]]],
-                target: Union[Dict[str, Tensor], List[Dict[str, Tensor]]],
+                input,
+                target,
                 anchors: Optional[Tensor] = None) -> Tensor:
         r"""
         Computes the matching between the predicted and target boxes, and the corresponding loss.
@@ -106,117 +106,59 @@ class DetectionLoss(_Loss):
         :return: loss
         :rtype: Tensor (float)
 
-        Examples::
-
-            >>> import torch
-            >>> from uotod.loss import DetectionLoss, NegativeProbLoss, GIoULoss, IoULoss
-            >>> from uotod.match import Hungarian, UnbalancedSinkhorn
-            >>> from uotod.utils import box_cxcywh_to_xyxy
-            >>> # Define the matching method
-            >>> matching_method = Hungarian(
-            >>>     cls_match_module=NegativeProbLoss(reduction="none"),
-            >>>     loc_match_module=torch.nn.L1Loss(reduction="none")
-            >>> )
-            >>> # Define the loss function
-            >>> loss_fn = DetectionLoss(
-            >>>     cls_loss_module=torch.nn.CrossEntropyLoss(reduction="none"),
-            >>>     loc_loss_module=GIoULoss(reduction="none"),
-            >>>     matching_method=matching_method
-            >>> )
-            >>> # Define the input
-            >>> pred = {"pred_logits": torch.randn(2, 100, 21),
-            >>>         "pred_boxes": box_cxcywh_to_xyxy(torch.rand(2, 100, 4))}
-            >>> # Define the target
-            >>> target = {"labels": torch.randint(1, 21, (2, 10)),      # 0 is the background class
-            >>>           "boxes": box_cxcywh_to_xyxy(torch.rand(2, 10, 4)),                # (x1, y1, x2, y2)
-            >>>           "mask": torch.ones(2, 10, dtype=torch.bool)}  # Padding mask
-            >>> # Compute the loss
-            >>> loss_fn(pred, target)
-
-            >>> # With anchors
-            >>> anchors = box_cxcywh_to_xyxy(torch.rand(100, 4))
-            >>> # Define the matching method
-            >>> matching_method = Hungarian(
-            >>>     cls_match_module=None,                                # No classification cost for matching anchors
-            >>>     loc_match_module=IoULoss(reduction="none"),
-            >>>     is_anchor_based=True                                # Use anchor-based matching
-            >>> )
-            >>> # Define the loss function
-            >>> loss_fn = DetectionLoss(
-            >>>     cls_loss_module=torch.nn.CrossEntropyLoss(reduction="none"),
-            >>>     loc_loss_module=GIoULoss(reduction="none"),
-            >>>     matching_method=matching_method
-            >>> )
-            >>> # Compute the loss
-            >>> loss_fn(pred, target, anchors)
-
-            >>> # Using Unbalanced Optimal Transport and hard negative mining
-            >>> # Define the matching method
-            >>> matching_method = UnbalancedSinkhorn(
-            >>>     cls_match_module=None,
-            >>>     loc_match_module=IoULoss(reduction="none"),
-            >>>     reg_pred=1e+3,                                      # Regularization parameter for the predicted boxes
-            >>>     reg_target=1e-3,                                    # Regularization parameter for the target boxes
-            >>>     background_cost=0.5,                                # Threshold (IoU) for matching to background
-            >>>     is_anchor_based=True                                # Use anchor-based matching
-            >>> )
-            >>> # Define the loss function
-            >>> loss_fn = DetectionLoss(
-            >>>     cls_loss_module=torch.nn.CrossEntropyLoss(reduction="none"),
-            >>>     loc_loss_module=GIoULoss(reduction="none"),
-            >>>     matching_method=matching_method,
-            >>>     use_hard_negative_mining=True,                      # Use hard negative mining
-            >>>     neg_to_pos_ratio=3.                                 # Use 3 negative samples for 1 positive sample
-            >>> )
-            >>> # Compute the loss
-            >>> loss_fn(pred, target, anchors)
         """
         # Convert the target to dict of masked tensors, if necessary.
-        if not isinstance(target, dict):
-            target = convert_target_to_dict(target)
+        # if not isinstance(target, dict):
+        #     target = convert_target_to_dict(target)
 
         # Repeat the anchors to match the batch size, if necessary.
-        if anchors is not None and anchors.dim() == 2:
-            anchors = anchors.unsqueeze(0).repeat(target['boxes'].shape[0], 1, 1)
+        # if anchors is not None and anchors.dim() == 2:
+        #     anchors = anchors.unsqueeze(0).repeat(target['boxes'].shape[0], 1, 1)
 
         # Compute the matching.
-        matching = self.matching_method(input, target, anchors)  # (batch_size, num_pred, num_targets + 1)
+        matching = self.matching_method(input, target[:-1, :], anchors)  # (batch_size, num_pred, num_labels + 1)
 
-        # Compute the loss terms.
-        cls_loss = self._compute_cls_losses(input['pred_logits'], target['labels'])  # (batch_size, num_pred, num_targets + 1)
-        loc_loss = self._compute_loc_losses(input['pred_boxes'], target['boxes'])  # (batch_size, num_pred, num_targets)
-
-        # Mask the loss matrices with the padding mask.
-        tgt_mask = target['mask'].unsqueeze(dim=1).expand(loc_loss.shape)
-        cls_loss[..., :-1] = cls_loss[..., :-1] * tgt_mask
-        loc_loss = loc_loss * tgt_mask
+        loss = self._compute_loss(input, target)
 
         # Compute the total loss.
-        cls_loss_pos = (matching[..., :-1] * cls_loss[..., :-1])
-        cls_loss_neg = (matching[..., -1] * cls_loss[..., -1])
-        loc_loss = (matching[..., :-1] * loc_loss)
+        loss_pos = (matching[..., :-1] * loss[..., :-1])
+        loss_neg = (matching[..., -1] * loss[..., -1])
 
-        # Hard negative mining.
         if self.use_hard_negative_mining:
-            cls_loss_neg = self._hard_negative_mining(cls_loss_neg, matching)
+            loss_neg = self._hard_negative_mining(loss_neg, matching)
 
-        # Average the loss terms.
         if self.reduction == 'mean':
-            num_pos_weighted, num_neg_weighted = self._get_averaging_coefs(matching, target['labels'])
+            num_pos_weighted, num_neg_weighted = self._get_averaging_coefs(matching)
             if self.use_hard_negative_mining:
-                cls_loss_reduced = (cls_loss_pos.sum() + cls_loss_neg.sum()) / num_pos_weighted
+                loss_reduced = (loss_pos.sum() + loss_neg.sum()) / num_pos_weighted
             else:
-                cls_loss_reduced = (cls_loss_pos.sum() + cls_loss_neg.sum()) / (num_pos_weighted + num_neg_weighted)
-            loc_loss_reduced = loc_loss.sum() / num_pos_weighted
-            return cls_loss_reduced + loc_loss_reduced
+                loss_reduced = (loss_pos.sum() + loss_neg.sum()) / (num_pos_weighted + num_neg_weighted)
+            
+            return loss_reduced
         elif self.reduction == 'sum':
-            cls_loss_reduced = (cls_loss_pos.sum() + cls_loss_neg.sum())
-            loc_loss_reduced = loc_loss.sum()
-            return cls_loss_reduced + loc_loss_reduced
+            return loss_pos.sum() + loss_neg.sum()
         else:
             raise ValueError(f"Unsupported reduction: {self.reduction}")
 
-    def _get_averaging_coefs(self, matching: Tensor, tgt_labels: Tensor) -> Tuple[Tensor, Tensor]:
+    def _compute_loss(self, input: Tensor, target: Tensor) -> Optional[Tensor]:
+      # input: queries with size (batch_size, num_queries, dim)
+      # target: labels descriptions with size (num_labels + 1, dim)    
+      # return Tensor: (batch_size, num_queries, num_labels + 1)
+      costs = []
+      batch_size, num_queries = input.size()[:2]
+      input = input.view(batch_size * num_queries, -1)
+      criterion = torch.nn.MSELoss(reduction="mean")
+
+      for query in input:
+        tmp_loss = torch.cat([criterion(query, label_desc).unsqueeze(0)
+                              for label_desc in target])
+        costs.append(tmp_loss.unsqueeze(0))
+
+      costs = torch.cat(costs, dim = 0).view(batch_size, num_queries, -1)
+
+      return costs
+
+    def _get_averaging_coefs(self, matching: Tensor) -> Tuple[Tensor, Tensor]:
         r"""
         Computes the number of positive and negative matches, weighted by the class weights.
 
@@ -233,19 +175,8 @@ class DetectionLoss(_Loss):
         """
         # FIXME: currently not compatible torch.nn.BCELoss() / torch.nn.BCELossWithLogits() weight parameter
         # Compute the weighting of the positive and negative classes.
-        if hasattr(self.loss_cls_module, "weight") and self.loss_cls_module.weight is not None and \
-                self.bg_class_position == "first":
-            pos_coefs = self.loss_cls_module.weight[tgt_labels]  # (batch_size, num_targets)
-            # old : pos_coefs = self.loss_cls_module.weight[1:][tgt_labels]
-            neg_coef = self.loss_cls_module.weight[0]
-        elif hasattr(self.loss_cls_module, "weight") and self.loss_cls_module.weight is not None and \
-                self.bg_class_position == "last":
-            pos_coefs = self.loss_cls_module.weight[tgt_labels]  # (batch_size, num_targets)
-            # old : pos_coefs = self.loss_cls_module.weight[:-1][tgt_labels]
-            neg_coef = self.loss_cls_module.weight[-1]
-        else:
-            pos_coefs = 1.
-            neg_coef = 1.
+        pos_coefs = 1.
+        neg_coef = 1.
 
         # Compute the number of positive samples: sum of the matching matrix, weighted by the gt class weights.
         num_pos_weighted = matching[..., :-1].sum(dim=1) * pos_coefs  # (batch_size, num_targets)
@@ -287,76 +218,76 @@ class DetectionLoss(_Loss):
 
         return cls_loss_neg
 
-    def _compute_cls_losses(self, pred_logits: Tensor, tgt_labels: Tensor) -> Tensor:
-        r"""
-        Computes the classification cost matrix.
-        :param pred_logits: Predicted logits. Tensor of shape (batch_size, num_pred, num_classes).
-        :type pred_logits: Tensor
-        :param tgt_labels: Ground-truth labels. Tensor of shape (batch_size, num_tgt) or
-            (batch_size, num_targets, num_classes) if one-hot encoding is used.
-        :type tgt_labels: Tensor
-        :return: Classification cost matrix. Tensor of shape (batch_size, num_pred, num_targets + 1).
-        :rtype: Tensor
-        """
-        batch_size, num_pred, num_classes = pred_logits.shape
-        num_tgt = tgt_labels.shape[1]
-        is_onehot = (tgt_labels.dim() == 3)
+    # def _compute_cls_losses(self, pred_logits: Tensor, tgt_labels: Tensor) -> Tensor:
+    #     r"""
+    #     Computes the classification cost matrix.
+    #     :param pred_logits: Predicted logits. Tensor of shape (batch_size, num_pred, num_classes).
+    #     :type pred_logits: Tensor
+    #     :param tgt_labels: Ground-truth labels. Tensor of shape (batch_size, num_tgt) or
+    #         (batch_size, num_targets, num_classes) if one-hot encoding is used.
+    #     :type tgt_labels: Tensor
+    #     :return: Classification cost matrix. Tensor of shape (batch_size, num_pred, num_targets + 1).
+    #     :rtype: Tensor
+    #     """
+    #     batch_size, num_pred, num_classes = pred_logits.shape
+    #     num_tgt = tgt_labels.shape[1]
+    #     is_onehot = (tgt_labels.dim() == 3)
 
-        if self.bg_class_position == "first":
-            if is_onehot:
-                raise NotImplementedError("bg_class_position='first' is not supported with one-hot encoding")
-            bg_class_index = 0
-        elif self.bg_class_position == "last":
-            if is_onehot:
-                raise NotImplementedError("bg_class_position='last' is not supported with one-hot encoding")
-            bg_class_index = num_classes - 1  # num_classes is the number of classes, including the background class
-        else:  # self.bg_class_position == "none"  (for focal loss)
-            if not is_onehot:
-                raise NotImplementedError("bg_class_position='none' is only supported with one-hot encoding")
-            assert num_classes == tgt_labels.shape[2], \
-                "num_classes must be equal to the number of classes in the one-hot encoding"
-            bg_class_index = None
+    #     if self.bg_class_position == "first":
+    #         if is_onehot:
+    #             raise NotImplementedError("bg_class_position='first' is not supported with one-hot encoding")
+    #         bg_class_index = 0
+    #     elif self.bg_class_position == "last":
+    #         if is_onehot:
+    #             raise NotImplementedError("bg_class_position='last' is not supported with one-hot encoding")
+    #         bg_class_index = num_classes - 1  # num_classes is the number of classes, including the background class
+    #     else:  # self.bg_class_position == "none"  (for focal loss)
+    #         if not is_onehot:
+    #             raise NotImplementedError("bg_class_position='none' is only supported with one-hot encoding")
+    #         assert num_classes == tgt_labels.shape[2], \
+    #             "num_classes must be equal to the number of classes in the one-hot encoding"
+    #         bg_class_index = None
 
-        pred_logits_rep = pred_logits.unsqueeze(dim=2).repeat(1, 1, num_tgt + 1, 1).view(
-            batch_size * num_pred * (num_tgt + 1), -1)
+    #     pred_logits_rep = pred_logits.unsqueeze(dim=2).repeat(1, 1, num_tgt + 1, 1).view(
+    #         batch_size * num_pred * (num_tgt + 1), -1)
 
-        if is_onehot:
-            tgt_classes_rep = tgt_labels.unsqueeze(dim=1).repeat(1, num_pred, 1, 1)
-            tgt_classes_rep = torch.cat([tgt_classes_rep, torch.zeros_like(tgt_classes_rep[:, :, :1, :])], dim=2)
-            tgt_classes_rep = tgt_classes_rep.view(batch_size * num_pred * (num_tgt + 1), num_classes)
-        else:
-            tgt_classes_rep = torch.full((batch_size, num_pred, num_tgt + 1), fill_value=bg_class_index,
-                                         dtype=torch.long, device=tgt_labels.device)
-            tgt_classes_rep[..., :num_tgt] = tgt_labels.unsqueeze(dim=1).expand(batch_size, num_pred, num_tgt)
-            tgt_classes_rep = tgt_classes_rep.view(batch_size * num_pred * (num_tgt + 1))
+    #     if is_onehot:
+    #         tgt_classes_rep = tgt_labels.unsqueeze(dim=1).repeat(1, num_pred, 1, 1)
+    #         tgt_classes_rep = torch.cat([tgt_classes_rep, torch.zeros_like(tgt_classes_rep[:, :, :1, :])], dim=2)
+    #         tgt_classes_rep = tgt_classes_rep.view(batch_size * num_pred * (num_tgt + 1), num_classes)
+    #     else:
+    #         tgt_classes_rep = torch.full((batch_size, num_pred, num_tgt + 1), fill_value=bg_class_index,
+    #                                      dtype=torch.long, device=tgt_labels.device)
+    #         tgt_classes_rep[..., :num_tgt] = tgt_labels.unsqueeze(dim=1).expand(batch_size, num_pred, num_tgt)
+    #         tgt_classes_rep = tgt_classes_rep.view(batch_size * num_pred * (num_tgt + 1))
 
-        # Compute the classification cost matrix.
-        cls_loss = self.loss_cls_module(pred_logits_rep, tgt_classes_rep).view(batch_size, num_pred, num_tgt + 1)
+    #     # Compute the classification cost matrix.
+    #     cls_loss = self.loss_cls_module(pred_logits_rep, tgt_classes_rep).view(batch_size, num_pred, num_tgt + 1)
 
-        return cls_loss
+    #     return cls_loss
 
-    def _compute_loc_losses(self, pred_locs: Tensor, tgt_locs: Tensor) -> Tensor:
-        r"""
-        Computes the localization cost matrix.
-        :param pred_locs: Predicted locations. Tensor of shape (batch_size, num_pred, 4).
-        :type pred_locs: Tensor
-        :param tgt_locs: Ground-truth locations. Tensor of shape (batch_size, num_targets, 4).
-        :type tgt_locs: Tensor
-        :return: Localization cost matrix. Tensor of shape (batch_size, num_pred, num_targets).
-        :rtype: Tensor
-        """
-        batch_size, num_pred = pred_locs.shape[:2]
-        num_tgt = tgt_locs.shape[1]
+    # def _compute_loc_losses(self, pred_locs: Tensor, tgt_locs: Tensor) -> Tensor:
+    #     r"""
+    #     Computes the localization cost matrix.
+    #     :param pred_locs: Predicted locations. Tensor of shape (batch_size, num_pred, 4).
+    #     :type pred_locs: Tensor
+    #     :param tgt_locs: Ground-truth locations. Tensor of shape (batch_size, num_targets, 4).
+    #     :type tgt_locs: Tensor
+    #     :return: Localization cost matrix. Tensor of shape (batch_size, num_pred, num_targets).
+    #     :rtype: Tensor
+    #     """
+    #     batch_size, num_pred = pred_locs.shape[:2]
+    #     num_tgt = tgt_locs.shape[1]
 
-        pred_locs_rep = pred_locs.unsqueeze(dim=2).repeat(1, 1, num_tgt, 1).view(
-            batch_size * num_pred * num_tgt, 4)
-        tgt_locs_rep = tgt_locs.unsqueeze(dim=1).repeat(1, num_pred, 1, 1).view(
-            batch_size * num_pred * num_tgt, 4)
+    #     pred_locs_rep = pred_locs.unsqueeze(dim=2).repeat(1, 1, num_tgt, 1).view(
+    #         batch_size * num_pred * num_tgt, 4)
+    #     tgt_locs_rep = tgt_locs.unsqueeze(dim=1).repeat(1, num_pred, 1, 1).view(
+    #         batch_size * num_pred * num_tgt, 4)
 
-        # Compute the localization cost matrix.
-        loc_loss = self.loss_loc_module(pred_locs_rep, tgt_locs_rep)
-        if loc_loss.dim() == 2:
-            loc_loss = loc_loss.sum(dim=1)
-        loc_loss = loc_loss.view(batch_size, num_pred, num_tgt)
+    #     # Compute the localization cost matrix.
+    #     loc_loss = self.loss_loc_module(pred_locs_rep, tgt_locs_rep)
+    #     if loc_loss.dim() == 2:
+    #         loc_loss = loc_loss.sum(dim=1)
+    #     loc_loss = loc_loss.view(batch_size, num_pred, num_tgt)
 
-        return loc_loss
+    #     return loc_loss
